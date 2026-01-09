@@ -3,10 +3,221 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:FlowFactor"
+        xmlns:vm="clr-namespace:FlowFactor.ViewModels"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
+        Title="FlowFactor"
+        Height="600"
+        Width="1000">
 
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Верхняя панель ввода -->
+        <WrapPanel Grid.Row="0" Orientation="Horizontal">
+
+            <TextBlock Text="Предмет:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+            <ComboBox Width="240"
+                      ItemsSource="{Binding Items}"
+                      SelectedItem="{Binding SelectedItem}"
+                      DisplayMemberPath="Name"
+                      Margin="0,0,12,0"/>
+
+            <TextBlock Text="Сборщик:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+            <ComboBox Width="170"
+                      ItemsSource="{Binding AssemblerMachines}"
+                      SelectedItem="{Binding SelectedAssemblerMachine}"
+                      DisplayMemberPath="Name"
+                      Margin="0,0,12,0"/>
+
+            <TextBlock Text="Печь:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+            <ComboBox Width="170"
+                      ItemsSource="{Binding FurnaceMachines}"
+                      SelectedItem="{Binding SelectedFurnaceMachine}"
+                      DisplayMemberPath="Name"
+                      Margin="0,0,12,0"/>
+
+            <TextBlock Text="Бур:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+            <ComboBox Width="190"
+                      ItemsSource="{Binding DrillMachines}"
+                      SelectedItem="{Binding SelectedDrillMachine}"
+                      DisplayMemberPath="Name"
+                      Margin="0,0,12,0"/>
+
+            <!-- Переключатель единиц -->
+            <TextBlock Text="Единицы:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+            <ComboBox Width="140"
+                      ItemsSource="{Binding Units}"
+                      SelectedItem="{Binding SelectedUnit}"
+                      Margin="0,0,12,0"/>
+
+            <TextBlock Text="{Binding TargetLabel}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+
+            <TextBox Width="120"
+                     Text="{Binding TargetRate, UpdateSourceTrigger=PropertyChanged}"
+                     Margin="0,0,12,0"/>
+
+            <Button Content="Рассчитать"
+                    Command="{Binding CalculateCommand}"
+                    Padding="16,6"
+                    Margin="0,0,12,0"/>
+
+            <TextBlock Text="{Binding TotalPowerKw, StringFormat=Энергия: {0:F1} kW}"
+                       VerticalAlignment="Center"/>
+        </WrapPanel>
+
+        <!-- Основная область -->
+        <Grid Grid.Row="1" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="2*"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- ЛЕВАЯ: дерево/граф -->
+            <TabControl Grid.Column="0" Margin="0,0,12,0">
+                <TabItem Header="Дерево">
+                    <GroupBox Header="Дерево зависимостей" Margin="8">
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <TreeView ItemsSource="{Binding Tree.Children}">
+                                <TreeView.ItemTemplate>
+                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                        <Border ToolTip="{Binding ToolTip}" Padding="2">
+                                            <StackPanel>
+                                                <TextBlock Text="{Binding Title}"
+                                                           FontSize="14"
+                                                           FontWeight="SemiBold"/>
+                                                <TextBlock Text="{Binding Subtitle}"
+                                                           Opacity="0.75"
+                                                           Margin="0,2,0,6"/>
+                                            </StackPanel>
+                                        </Border>
+                                    </HierarchicalDataTemplate>
+                                </TreeView.ItemTemplate>
+                            </TreeView>
+                        </ScrollViewer>
+                    </GroupBox>
+                </TabItem>
+
+                <TabItem Header="Граф">
+                    <GroupBox Header="Граф зависимостей" Margin="8">
+                        <!-- ScrollViewer оставляем, но Pan/Zoom делаем внутри через Transform -->
+                        <ScrollViewer HorizontalScrollBarVisibility="Auto"
+                                      VerticalScrollBarVisibility="Auto"
+                                      PreviewMouseWheel="Graph_PreviewMouseWheel"
+                                      PreviewMouseLeftButtonDown="Graph_MouseLeftButtonDown"
+                                      PreviewMouseLeftButtonUp="Graph_MouseLeftButtonUp"
+                                      PreviewMouseMove="Graph_MouseMove">
+
+                            <!-- Контейнер графа -->
+                            <Grid>
+                                <Grid.RenderTransform>
+                                    <TransformGroup>
+                                        <ScaleTransform ScaleX="{Binding Zoom}" ScaleY="{Binding Zoom}"/>
+                                        <TranslateTransform X="{Binding PanX}" Y="{Binding PanY}"/>
+                                    </TransformGroup>
+                                </Grid.RenderTransform>
+
+                                <!-- фон чтобы можно было панить по пустому месту -->
+                                <Border Width="{Binding GraphWidth}"
+                                        Height="{Binding GraphHeight}"
+                                        Background="Transparent"/>
+
+                                <!-- РЁБРА: плавные кривые + стрелка -->
+                                <ItemsControl ItemsSource="{Binding GraphEdges}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <Canvas Width="{Binding GraphWidth}"
+                                                    Height="{Binding GraphHeight}"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Canvas IsHitTestVisible="False">
+                                                <Path Data="{Binding Curve}"
+                                                      StrokeThickness="1"
+                                                      Opacity="0.7"/>
+                                                <Path Data="{Binding ArrowHead}"
+                                                      Opacity="0.85"/>
+                                            </Canvas>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <!-- УЗЛЫ -->
+                                <ItemsControl ItemsSource="{Binding GraphNodes}">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <Canvas Width="{Binding GraphWidth}"
+                                                    Height="{Binding GraphHeight}"/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+
+                                    <ItemsControl.ItemContainerStyle>
+                                        <Style TargetType="ContentPresenter">
+                                            <Setter Property="Canvas.Left" Value="{Binding X}"/>
+                                            <Setter Property="Canvas.Top" Value="{Binding Y}"/>
+                                        </Style>
+                                    </ItemsControl.ItemContainerStyle>
+
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Width="{Binding Width}"
+                                                    Padding="8"
+                                                    CornerRadius="10"
+                                                    BorderThickness="1"
+                                                    ToolTip="{Binding ToolTip}">
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding Title}"
+                                                               FontSize="14"
+                                                               FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding Subtitle}"
+                                                               Opacity="0.75"
+                                                               Margin="0,2,0,0"/>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Grid>
+                        </ScrollViewer>
+                    </GroupBox>
+                </TabItem>
+            </TabControl>
+
+            <!-- Сырьё -->
+            <GroupBox Header="Сырьё" Grid.Column="1" Margin="0,0,12,0">
+                <DataGrid ItemsSource="{Binding RawRows}"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          CanUserAddRows="False">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Ресурс" Binding="{Binding Name}" Width="*"/>
+                        <DataGridTextColumn Header="Кол-во" Binding="{Binding Value, StringFormat={}{0:F2}}" Width="90"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </GroupBox>
+
+            <!-- Машины -->
+            <GroupBox Header="Машины" Grid.Column="2">
+                <DataGrid ItemsSource="{Binding MachineRows}"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          CanUserAddRows="False">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Тип" Binding="{Binding Name}" Width="*"/>
+                        <DataGridTextColumn Header="Кол-во" Binding="{Binding Value, StringFormat={}{0:F2}}" Width="90"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </GroupBox>
+        </Grid>
     </Grid>
 </Window>
