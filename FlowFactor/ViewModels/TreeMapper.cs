@@ -1,6 +1,8 @@
 ﻿using FlowFactor.Domain;
 using FlowFactor.Services;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace FlowFactor.ViewModels;
 
@@ -23,14 +25,13 @@ public static class TreeMapper
             var icon = iconFor(node.MachineCategory);
             var title = $"{icon} {node.ItemName}".Trim();
 
-            var subtitle = $"{format(rateDisplay)} {unitLabel}";
+            var line1 = $"{format(rateDisplay)} {unitLabel}";
             var toolTip = $"{node.ItemName}: {format(rateDisplay)} {unitLabel}";
 
             if (node.MachinesNeeded is double exact && node.MachineName is { Length: > 0 } machineName)
             {
                 var rounded = VmText.RoundUpMachines(exact);
-
-                subtitle += $" • {machineName} × {format(exact)} ({rounded} шт.)";
+                line1 += $" • {machineName} × {format(exact)} ({rounded} шт.)";
 
                 var perMachinePerMin = node.RatePerMachinePerMin ?? 0;
                 var perMachineDisplay = perMachinePerMin * fromPerMinFactor;
@@ -42,14 +43,28 @@ public static class TreeMapper
                     $"{node.ItemName}: {format(rateDisplay)} {unitLabel}";
             }
 
-            if (node.FuelPerMin is double fuelPerMin && fuelPerMin > 0 && !string.IsNullOrWhiteSpace(node.FuelItemId))
+            var badges = new List<string>();
+
+            // Мощность (kW/MW) 
+            if (node.ElectricPowerKw is double eKw && Math.Abs(eKw) > 1e-9)
+            {
+                badges.Add(VmText.FormatPowerBadge(eKw));
+                toolTip += $"\nЭлектроэнергия: {VmText.FormatPowerBadge(eKw)}";
+            }
+
+            // Топливо 
+            if (node.FuelPerMin is double fuelPerMin && fuelPerMin > 1e-12 && !string.IsNullOrWhiteSpace(node.FuelItemId))
             {
                 var fuelDisplay = fuelPerMin * fromPerMinFactor;
                 var fuelName = getItemName(node.FuelItemId);
 
-                subtitle += $" • {fuelName}: {format(fuelDisplay)} {unitLabel}";
-                toolTip += $"\nТопливо: {fuelName} = {format(fuelDisplay)} {unitLabel}";
+                badges.Add($"🔥 {fuelName}: {format(fuelDisplay)} {unitLabel}");
+                toolTip += $"\nТопливо: 🔥 {fuelName} = {format(fuelDisplay)} {unitLabel}";
             }
+
+            var subtitle = badges.Count == 0
+                ? line1
+                : line1 + "\n" + string.Join("   ", badges);
 
             var vm = new TreeNodeVm(title, subtitle, toolTip);
 

@@ -12,6 +12,8 @@ public static class VmText
         "drill" => "⛏",
         "furnace" => "🔥",
         "assembler" => "⚙️",
+        "boiler" => "♨️",
+        "generator" => "⚡",
         null => "",
         _ => "🏭"
     };
@@ -27,4 +29,25 @@ public static class VmText
 
     public static string GetItemName(string id)
         => SampleData.Items.FirstOrDefault(i => i.Id == id)?.Name ?? id;
+
+    public static string FormatPower(double kw)
+    {
+        var abs = Math.Abs(kw);
+
+        if (abs >= 1000)
+            return $"{Format(kw / 1000.0)} MW";
+
+        return $"{Format(kw)} kW";
+    }
+
+    public static string FormatPowerBadge(double electricPowerKw)
+    {
+        if (electricPowerKw > 0)
+            return $"⚡ {FormatPower(electricPowerKw)}";
+
+        if (electricPowerKw < 0)
+            return $"⚡ +{FormatPower(-electricPowerKw)}";
+
+        return "⚡ 0 kW";
+    }
 }

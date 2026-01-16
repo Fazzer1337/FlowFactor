@@ -7,6 +7,9 @@ namespace FlowFactor.Services;
 
 public sealed class ProductionCalculator
 {
+    private const string BoilerCategory = "boiler";
+    private const string GeneratorCategory = "generator";
+
     private readonly Dictionary<string, Item> _itemsById;
     private readonly Dictionary<string, Recipe> _recipeByOutput;
     private readonly Dictionary<string, List<MachineSpec>> _machinesByCategory;
@@ -18,7 +21,6 @@ public sealed class ProductionCalculator
         IEnumerable<MachineSpec> machines)
     {
         _itemsById = items.ToDictionary(i => i.Id, i => i);
-
         _recipeByOutput = recipes.ToDictionary(r => r.OutputItemId, r => r);
 
         var machineList = machines.ToList();
@@ -29,137 +31,242 @@ public sealed class ProductionCalculator
             .ToDictionary(g => g.Key, g => g.OrderBy(m => m.CraftingSpeed).ToList());
     }
 
-    public CalculationResult Calculate(string targetItemId, double targetPerMin, ProductionOptions? options = null)
+    public CalculationResult CalculateMany(
+        IReadOnlyDictionary<string, double> targetsPerMin,
+        ProductionOptions? options = null)
     {
-        if (!_itemsById.ContainsKey(targetItemId))
-            throw new ArgumentException($"Unknown item id: {targetItemId}");
-
-        if (targetPerMin <= 0)
-            throw new ArgumentOutOfRangeException(nameof(targetPerMin), "Target rate must be > 0");
-
         options ??= new ProductionOptions();
 
         var visiting = new HashSet<string>();
 
         var itemsPerMin = new Dictionary<string, double>();
-        var rawPerMin = new Dictionary<string, double>(); 
+        var rawPerMin = new Dictionary<string, double>();
+        var baseResourcesPerMin = new Dictionary<string, double>();
+        var fuelPerMin = new Dictionary<string, double>();
         var machines = new Dictionary<string, double>();
 
-        var root = Expand(
-            itemId: targetItemId,
-            requiredPerMin: targetPerMin,
-            visiting: visiting,
-            itemsPerMin: itemsPerMin,
-            rawPerMin: rawPerMin,
-            machines: machines,
-            options: options,
-            out var totalPowerKw);
+        double consumedPowerKw = 0;
+        double producedPowerKw = 0;
+
+        var superRoot = new TreeNode
+        {
+            ItemId = "__targets__",
+            ItemName = "Цели",
+            RatePerMin = 0
+        };
+
+        foreach (var (itemId, rate) in targetsPerMin)
+        {
+            var node = Expand(
+                itemId,
+                rate,
+                rate,
+                visiting,
+                itemsPerMin,
+                rawPerMin,
+                baseResourcesPerMin,
+                fuelPerMin,
+                machines,
+                options,
+                out var consumed,
+                out var produced);
+
+            consumedPowerKw += consumed;
+            producedPowerKw += produced;
+            superRoot.Children.Add(node);
+        }
+
+        // Автоподбор энергетики: если не хватает - добавляем источники энергии для поддержания необходимой выработки
+        double autoAddedKw = 0;
+        if (producedPowerKw < consumedPowerKw)
+        {
+            autoAddedKw = AutoAddSteamPower(
+                requiredConsumedKw: consumedPowerKw,
+                currentProducedKw: producedPowerKw,
+                machines: machines,
+                fuelPerMin: fuelPerMin,
+                options: options,
+                out var extraProducedKw);
+
+            producedPowerKw += extraProducedKw;
+        }
 
         return new CalculationResult
         {
-            Root = root,
-            TotalPowerKw = totalPowerKw,
+            Root = superRoot,
             ItemsPerMin = itemsPerMin,
             RawPerMin = rawPerMin,
-            Machines = machines
+            BaseResourcesPerMin = baseResourcesPerMin,
+            FuelPerMin = fuelPerMin,
+            Machines = machines,
+
+            TotalPowerKw = consumedPowerKw,
+            ProducedPowerKw = producedPowerKw,
+            AutoPowerAddedKw = autoAddedKw
         };
+    }
+
+    private double AutoAddSteamPower(
+        double requiredConsumedKw,
+        double currentProducedKw,
+        Dictionary<string, double> machines,
+        Dictionary<string, double> fuelPerMin,
+        ProductionOptions options,
+        out double extraProducedKw)
+    {
+        extraProducedKw = 0;
+
+        var missingKw = requiredConsumedKw - currentProducedKw;
+        if (missingKw <= 0)
+            return 0;
+
+        var boiler = ResolveMachine(BoilerCategory, options);
+        var engine = ResolveMachine(GeneratorCategory, options);
+
+        if (engine.PowerKw >= 0)
+            throw new InvalidOperationException("Generator machine must have negative PowerKw (production).");
+
+        var engineProducesKw = -engine.PowerKw;
+        if (engineProducesKw <= 0)
+            throw new InvalidOperationException("Invalid generator power.");
+
+        if (boiler.PowerKw <= 0 || !boiler.UsesFuel || boiler.FuelValueMj <= 0 || string.IsNullOrWhiteSpace(boiler.FuelItemId))
+            throw new InvalidOperationException("Boiler must be a burner machine with PowerKw > 0, FuelItemId and FuelValueMj.");
+
+
+        var enginesNeeded = Math.Ceiling(missingKw / engineProducesKw);
+
+        var boilersNeeded = Math.Ceiling(enginesNeeded / 2.0);
+
+        Add(machines, engine.Name, enginesNeeded);
+        Add(machines, boiler.Name, boilersNeeded);
+
+        var produced = enginesNeeded * engineProducesKw;
+        extraProducedKw = produced;
+
+        var coalPerMin = boilersNeeded * boiler.PowerKw * 60.0 / (boiler.FuelValueMj * 1000.0);
+        Add(fuelPerMin, boiler.FuelItemId!, coalPerMin);
+
+        return produced;
     }
 
     private TreeNode Expand(
         string itemId,
         double requiredPerMin,
+        double inflowPerMin,
         HashSet<string> visiting,
         Dictionary<string, double> itemsPerMin,
         Dictionary<string, double> rawPerMin,
+        Dictionary<string, double> baseResourcesPerMin,
+        Dictionary<string, double> fuelPerMin,
         Dictionary<string, double> machines,
         ProductionOptions options,
-        out double totalPowerKw)
+        out double consumedKw,
+        out double producedKw)
     {
-        totalPowerKw = 0;
-
-        if (!_itemsById.TryGetValue(itemId, out var item))
-            throw new InvalidOperationException($"Item not found: {itemId}");
+        consumedKw = 0;
+        producedKw = 0;
 
         Add(itemsPerMin, itemId, requiredPerMin);
 
         if (!_recipeByOutput.TryGetValue(itemId, out var recipe))
         {
-            throw new InvalidOperationException(
-                $"No recipe defined for item '{itemId}' ('{item.Name}'). " +
-                $"Add a recipe (e.g., mining for ores/coal/stone).");
-        }
-
-        if (!visiting.Add(itemId))
-        {
+            Add(rawPerMin, itemId, requiredPerMin);
             return new TreeNode
             {
                 ItemId = itemId,
-                ItemName = item.Name + " (cycle)",
+                ItemName = _itemsById[itemId].Name,
                 RatePerMin = requiredPerMin,
-                RecipeId = recipe.Id,
-                MachineCategory = recipe.MachineType
+                InflowPerMin = inflowPerMin
             };
         }
 
+        if (!visiting.Add(itemId))
+            return new TreeNode
+            {
+                ItemId = itemId,
+                ItemName = _itemsById[itemId].Name + " (cycle)",
+                RatePerMin = requiredPerMin
+            };
+
         var machine = ResolveMachine(recipe.MachineType, options);
 
-        double ratePerMachinePerMin = (recipe.OutputAmount / recipe.TimeSeconds) * 60.0 * machine.CraftingSpeed;
-        if (ratePerMachinePerMin <= 0)
-            throw new InvalidOperationException($"Invalid recipe rate for recipe '{recipe.Id}'.");
+        var ratePerMachinePerMin =
+            (recipe.OutputAmount / recipe.TimeSeconds) * 60 * machine.CraftingSpeed;
 
-        double machinesNeeded = requiredPerMin / ratePerMachinePerMin;
-
+        var machinesNeeded = requiredPerMin / ratePerMachinePerMin;
         Add(machines, machine.Name, machinesNeeded);
-        if (!machine.UsesFuel)
-            totalPowerKw += machinesNeeded * machine.PowerKw;
-        double? fuelPerMin = null;
-        string? fuelItemId = null;
 
-        if (machine.UsesFuel &&
-            !string.IsNullOrWhiteSpace(machine.FuelItemId) &&
-            machine.FuelValueMj > 0 &&
-            machine.PowerKw > 0)
+        double? nodeElectricKw = null;
+
+        // Энергопотребление
+        if (machine.PowerKw > 0)
         {
-            var coalPerMin = machinesNeeded * machine.PowerKw * 60.0 / (machine.FuelValueMj * 1000.0);
+            var p = machinesNeeded * machine.PowerKw;
+            consumedKw += p;
+            nodeElectricKw = p;
+        }
+        else if (machine.PowerKw < 0)
+        {
+            var p = machinesNeeded * (-machine.PowerKw);
+            producedKw += p;
+            nodeElectricKw = -p;
+        }
+
+        // Топливо
+        string? fuelItemId = null;
+        double? fuelRate = null;
+
+        if (machine.UsesFuel && machine.PowerKw > 0)
+        {
+            var fuelPerMinLocal =
+                machinesNeeded * machine.PowerKw * 60 /
+                (machine.FuelValueMj * 1000);
 
             fuelItemId = machine.FuelItemId;
-            fuelPerMin = coalPerMin;
-
-            Add(rawPerMin, fuelItemId, coalPerMin);
+            fuelRate = fuelPerMinLocal;
+            Add(fuelPerMin, fuelItemId!, fuelPerMinLocal);
         }
+
+        if (recipe.Inputs.Count == 0)
+            Add(baseResourcesPerMin, itemId, requiredPerMin);
 
         var node = new TreeNode
         {
             ItemId = itemId,
-            ItemName = item.Name,
+            ItemName = _itemsById[itemId].Name,
             RatePerMin = requiredPerMin,
             RecipeId = recipe.Id,
             MachinesNeeded = machinesNeeded,
-
             MachineCategory = recipe.MachineType,
             MachineName = machine.Name,
             RatePerMachinePerMin = ratePerMachinePerMin,
-
+            ElectricPowerKw = nodeElectricKw,
             FuelItemId = fuelItemId,
-            FuelPerMin = fuelPerMin
+            FuelPerMin = fuelRate,
+            InflowPerMin = inflowPerMin
         };
 
-        foreach (var (inputId, inputAmount) in recipe.Inputs)
+        foreach (var (inputId, amount) in recipe.Inputs)
         {
-            double perUnitOut = inputAmount / recipe.OutputAmount;
-            double childRate = requiredPerMin * perUnitOut;
+            var childRate = requiredPerMin * amount / recipe.OutputAmount;
 
             var child = Expand(
-                itemId: inputId,
-                requiredPerMin: childRate,
-                visiting: visiting,
-                itemsPerMin: itemsPerMin,
-                rawPerMin: rawPerMin,
-                machines: machines,
-                options: options,
-                out var childPower);
+                inputId,
+                childRate,
+                childRate,
+                visiting,
+                itemsPerMin,
+                rawPerMin,
+                baseResourcesPerMin,
+                fuelPerMin,
+                machines,
+                options,
+                out var cKw,
+                out var pKw);
 
-            totalPowerKw += childPower;
+            consumedKw += cKw;
+            producedKw += pKw;
             node.Children.Add(child);
         }
 

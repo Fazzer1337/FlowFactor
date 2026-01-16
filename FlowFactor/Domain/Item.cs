@@ -7,4 +7,3 @@ using System.Threading.Tasks;
 namespace FlowFactor.Domain;
 
 public sealed record Item(string Id, string Name);
-

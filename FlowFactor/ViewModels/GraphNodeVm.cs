@@ -22,4 +22,5 @@ public sealed class GraphNodeVm
     }
 
     public double CenterY => Y + Height / 2.0;
+    public double CenterX => X + Width / 2.0;
 }
